@@ -1,0 +1,191 @@
+#include <mcp_can.h>
+#include <mcp_can_dfs.h>
+#include <SPI.h>
+#include <ESP8266WiFi.h>
+#include "OLED.h"
+#include <Wire.h>
+
+//pins:
+#define CAN_INT 2    // Set INT to pin 2
+MCP_CAN CAN(15);    // Set CS to pin 4 (D2)
+OLED display(4, 5);
+
+//Wifi and thingspeak setup:
+String apiKey = "XXXXXXXXXXXXXXXXXX";    //thinkspeak api write key of you chanle goes here
+const char* ssid = "XXXXXXXX";    //wifi name goes here
+const char* password = "XXXXXXXX";    //wifi psk goes here
+const char* server = "api.thingspeak.com";
+
+//variables:
+unsigned char payload2[8] = {0x16, 0x00, 0x6C, 0x16, 0x6C, 0x16, 0xF8, 0x16};    //setup data with max current & voltage 
+int T = 0;
+int I = 0;
+int Ubat = 0;
+int P = 0;
+int Uac = 0;
+int E = 0;
+int l = 0;
+int relay=0;
+int counter = 1;
+long unsigned int canID;
+unsigned char datalength = 0;
+unsigned char reData[8];
+
+WiFiClient client;
+
+void setup()
+{
+  Serial.begin(115200);
+  delay(100);
+  pinMode(2, INPUT);    //Setting pin 2 for /INT input
+  pinMode(16, OUTPUT);    //Setting pin 16 for relay out
+  digitalWrite(16, HIGH);
+  display.begin();
+  display.print("Select AMP:",1);
+  delay(2000);
+  WiFi.begin(ssid, password);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(500);
+  }
+  display.clear();
+
+START_INIT:
+  if(CAN_OK == CAN.begin(MCP_ANY, CAN_125KBPS, MCP_8MHZ))    //test can module
+  {
+    delay(100);
+  }
+  else
+  {
+    delay(1000);
+    goto START_INIT;
+  }
+  CAN.setMode(MCP_NORMAL);    //set operation mode to normal so the MCP2515 sends and receives
+  unsigned char payload1[8] = {0x11, 0x29, 0x71, 0x14, 0x55, 0x80, 0x00, 0x00};    //login data with serial number
+  CAN.sendMsgBuf(0x05004804, 1, 8, payload1);    //send login data
+  delay(500);
+  CAN.sendMsgBuf(0x05FF4005, 1, 8, payload2);    //send setup data
+
+//rotary switch setup and read:
+  pinMode(D3, INPUT);
+  pinMode(D9, INPUT);
+  pinMode(D10, INPUT);
+  int state5 = digitalRead(D3);
+  int state10 = digitalRead(D9);
+  int state15 = digitalRead(D10);
+  
+  if (state5==0)
+  {
+    display.print("-> 5 A",1);
+    payload2[0]=0x32;    //changes first part of setup data (max current = 5 A)
+   }
+  if (state10==0)
+  {
+    display.print("-> 10 A",1);
+    payload2[0]=0x64;    //changes first part of setup data (max current = 10 A)
+  }
+  if (state15==0)
+  {
+    display.print("-> 15 A",1);
+    payload2[0]=0x96;    //changes first part of setup data (max current = 15 A)
+  }
+  delay(2000);
+
+//relay charge setup:
+  digitalWrite(16, LOW);    //close relay
+  relay=1;
+  delay(5000);
+}
+
+void loop()
+{
+  unsigned char payload1[8] = {0x11, 0x29, 0x71, 0x14, 0x55, 0x80, 0x00, 0x00};    //login data with serial number
+  CAN.sendMsgBuf(0x05004804, 1, 8, payload1);    //send login data
+  delay(500);
+  CAN.sendMsgBuf(0x05FF4005, 1, 8, payload2);    //send setup data
+  delay(500);
+  if(!digitalRead(2))    //if pin 2 is low, read receive data
+  {
+//fetch data from flatpack:
+    CAN.readMsgBuf(&canID, &datalength, reData);
+    if(canID == 2231451652)    //ID check, only use state messages
+    {
+//analyze data from flatpack:
+      T = reData[0];
+      I = ((reData[2]*255+reData[1])*100);
+      Ubat = ((reData[4]*255*0.1+reData[3]*0.1)*100);
+      P = Ubat * I;
+      Uac = (reData[5]);
+      P = P / 1000;
+      char energie[5];
+      itoa (E, energie, 10);      
+      char current[5];
+      itoa (I, current, 10);
+      char voltage[5];
+      itoa (Ubat, voltage, 10);
+      char power[5];
+      itoa (P, power, 10);
+      char temp[4];
+      itoa (T, temp, 10);
+      char state[4];
+      itoa (relay, state, 10);
+//display data:
+      display.print("T [C]:",1);
+      display.print(temp,1,10);
+      display.print("I [mA]:",2);
+      display.print(current,2,10);
+      display.print("U [mV]:",3);
+      display.print(voltage,3,10);
+      display.print("P [mW]:",4);
+      display.print(power,4,10);
+      display.print("E [mWh]:",5);
+      display.print(energie,5,10);
+      display.print("Relay:",6);
+      display.print(state,6,10);
+    }
+  }
+
+  if (l > 18)    //roughly every 30 s: check relay state & upload data to thinkspeak,
+  {
+    if (client.connect(server,80))
+    {
+//relay control:
+      if (I < 500)    //open relay if current is unter 500 mA
+      {
+        digitalWrite(16, HIGH);
+        relay=0;
+      }
+      if (I > 20000)    //open relay if current is over 20 A
+      {
+        digitalWrite(16, HIGH);
+        relay=0;
+      }
+//upload data to thinkspeak:
+      E = E + (P / 120);    //energy calc for upload every 30s
+      String postStr = apiKey;
+      postStr +="&field1=";
+      postStr += String(T);
+      postStr +="&field2=";
+      postStr += String(I);
+      postStr +="&field3=";
+      postStr += String(Ubat);
+      postStr +="&field4=";
+      postStr += String(P);
+      postStr +="&field5=";
+      postStr += String(E);   
+      postStr += "\r\n\r\n";
+      client.print("POST /update HTTP/1.1\n");
+      client.print("Host: api.thingspeak.com\n");
+      client.print("Connection: close\n");
+      client.print("X-THINGSPEAKAPIKEY: "+apiKey+"\n");
+      client.print("Content-Type: application/x-www-form-urdatalengthcoded\n");
+      client.print("Content-datalengthgth: ");
+      client.print(postStr.length());
+      client.print("\n\n");
+      client.print(postStr);
+      l = 0;
+    }
+  }
+  l = (l + 1);
+}

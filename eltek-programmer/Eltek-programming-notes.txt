@@ -1,0 +1,5 @@
+NodeMCU programmer:
+Pin usage:
+- I2C for the OLED: D1(SCL), D2(SDA), 3.3V & GND
+- Current selection: D3, D9, D10 & GND (only D9 can stay switched on GND during boot, otherwise the NodeMCU will not start)
+- SPI for the CAN Shield (MCP2515 with modification): D4(INT), D5(SCK), D6(MISO), D7(MOSI), D8(CS) + 5V for the Tranceiver, 3.3V for the SPI chip of the CAN & GND
